@@ -211,3 +211,197 @@ export function rollExpression(expression: string, rng: Rng = Math.random): numb
   const total = rollDice(parsed.count, parsed.sides, rng).reduce((sum, value) => sum + value, 0)
   return Math.max(0, total + parsed.modifier)
 }
+
+/** One rolled term of a general dice notation. */
+export interface DiceRollDetail {
+  /** Notation of this term, e.g. `1D6`, `+2` or a DB-expanded `1D4`. */
+  term: string
+  /** Individual die faces (empty for a constant term). */
+  values: number[]
+  /** Signed contribution of this term to the total. */
+  subtotal: number
+}
+
+/** Result of {@link rollDiceNotation}. */
+export interface DiceNotationResult {
+  /** Original expression as supplied. */
+  expression: string
+  /** Expression after `DB` substitution, e.g. `1D6+1D4+2`. */
+  resolved_expression: string
+  /** The DB expression that was substituted, or null when none was needed. */
+  db: string | null
+  /** Sum of every term (may be negative when a DB penalty applies). */
+  total: number
+  /** Per-term detail so the caller can show every die face. */
+  rolls: DiceRollDetail[]
+}
+
+/** One parsed term of a general dice notation. */
+interface ParsedNotationTerm {
+  sign: 1 | -1
+  label: string
+  kind: 'dice' | 'constant' | 'db'
+  count: number
+  sides: number
+  value: number
+}
+
+/** First integer inside a characteristic value such as `60` or `5D6 (17-18)`. */
+function firstNumericValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+  if (typeof value !== 'string') return null
+  const match = /-?\d+/.exec(value.replace(/,/g, ''))
+  return match === null ? null : Number(match[0])
+}
+
+/** Normalize notation: trim spaces, unify full-width and minus characters. */
+function normalizeNotation(expression: string): string {
+  return String(expression ?? '')
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/＋/g, '+')
+    .replace(/[−–—]/g, '-')
+}
+
+/** Split a notation into signed tokens (`+1D6`, `-2`, `DB`, ...). */
+function splitNotationTerms(text: string, original: string): Array<{ sign: 1 | -1; token: string }> {
+  if (text.length === 0) throw new Error(`无法解析骰子表达式: ${original}`)
+  const terms: Array<{ sign: 1 | -1; token: string }> = []
+  let index = 0
+  while (index < text.length) {
+    let sign: 1 | -1 = 1
+    const char = text[index]
+    if (char === '+') index += 1
+    else if (char === '-') {
+      sign = -1
+      index += 1
+    }
+    let end = index
+    while (end < text.length && text[end] !== '+' && text[end] !== '-') end += 1
+    const token = text.slice(index, end)
+    if (token.length === 0) throw new Error(`无法解析骰子表达式: ${original}`)
+    terms.push({ sign, token })
+    index = end
+  }
+  return terms
+}
+
+/** Parse one token; `DB` stays a placeholder until the caller supplies its expression. */
+function parseNotationToken(token: string, sign: 1 | -1, original: string): ParsedNotationTerm {
+  const dice = /^(\d*)D(\d+)$/.exec(token)
+  if (dice !== null) {
+    const count = dice[1] === '' ? 1 : Number(dice[1])
+    const sides = Number(dice[2])
+    if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error(`骰子数量越界: ${token}`)
+    if (!Number.isInteger(sides) || sides < 2 || sides > 1000) throw new Error(`骰子面数越界: ${token}`)
+    return { sign, label: `${count}D${sides}`, kind: 'dice', count, sides, value: 0 }
+  }
+  if (/^\d+$/.test(token)) {
+    return { sign, label: token, kind: 'constant', count: 0, sides: 0, value: Number(token) }
+  }
+  if (token === 'DB') return { sign, label: 'DB', kind: 'db', count: 0, sides: 0, value: 0 }
+  throw new Error(`无法解析骰子项: ${token}（表达式: ${original}）`)
+}
+
+/** The CoC 7e damage-bonus tiers for a STR+SIZ total. */
+export function damageBonusFor(strPlusSiz: number): string {
+  if (!Number.isFinite(strPlusSiz)) throw new Error(`无效的 STR+SIZ: ${String(strPlusSiz)}`)
+  const total = Math.trunc(strPlusSiz)
+  if (total < 0) throw new Error(`STR+SIZ 不能为负数: ${strPlusSiz}`)
+  if (total <= 64) return '-2'
+  if (total <= 84) return '-1'
+  if (total <= 124) return '0'
+  const dice = Math.min(20, Math.floor((total - 125) / 80) + 1)
+  return `+${dice}D6`
+}
+
+/** Damage bonus derived from a character sheet's STR and SIZ, or null when unknown. */
+export function damageBonusForAttributes(attributes: Readonly<Record<string, unknown>>): string | null {
+  const str = firstNumericValue(attributes['STR'])
+  const siz = firstNumericValue(attributes['SIZ'])
+  if (str === null || siz === null) return null
+  return damageBonusFor(str + siz)
+}
+
+/**
+ * Roll a general CoC dice notation: multiple terms (`1D6+1D10+2`), optional
+ * `DB` substitution (`1D6+DB` with `db: '1D4'`), and full per-term detail.
+ */
+export function rollDiceNotation(
+  expression: string,
+  options: { db?: string; rng?: Rng } = {},
+): DiceNotationResult {
+  const source = String(expression ?? '').trim()
+  if (source.length === 0) throw new Error('骰子表达式不能为空')
+  const parsed = splitNotationTerms(normalizeNotation(source), source).map((term) =>
+    parseNotationToken(term.token, term.sign, source),
+  )
+  const dbTerms = parsed.filter((term) => term.kind === 'db')
+  if (dbTerms.length > 1) throw new Error('DB 只能出现一次')
+  let dbExpression: string | null = null
+  let terms = parsed
+  if (dbTerms.length === 1) {
+    const dbText = String(options.db ?? '').trim()
+    if (dbText.length === 0) throw new Error('表达式包含 DB，但未提供 DB 值（db 参数或角色属性）')
+    dbExpression = dbText
+    const expanded = splitNotationTerms(normalizeNotation(dbText), dbText).map((term) =>
+      parseNotationToken(term.token, term.sign, dbText),
+    )
+    terms = parsed.flatMap((term) =>
+      term.kind === 'db'
+        ? expanded.map((inner) => ({ ...inner, sign: (term.sign * inner.sign) as 1 | -1 }))
+        : [term],
+    )
+  }
+
+  const rng = options.rng ?? Math.random
+  const rolls: DiceRollDetail[] = []
+  let total = 0
+  for (const term of terms) {
+    if (term.kind === 'dice') {
+      const values = rollDice(term.count, term.sides, rng)
+      const subtotal = term.sign * values.reduce((sum, value) => sum + value, 0)
+      total += subtotal
+      rolls.push({ term: term.label, values, subtotal })
+    } else {
+      const subtotal = term.sign * term.value
+      total += subtotal
+      rolls.push({ term: term.label, values: [], subtotal })
+    }
+  }
+
+  const resolved = terms
+    .map((term, index) => `${index === 0 ? (term.sign === 1 ? '' : '-') : term.sign === 1 ? '+' : '-'}${term.label}`)
+    .join('')
+  return { expression: source, resolved_expression: resolved, db: dbExpression, total, rolls }
+}
+
+/** Parsed armor information of one bestiary template. */
+export interface ArmorInfo {
+  /** Damage reduction points; 0 when the template has no numeric armor. */
+  armor: number
+  /** True when the template text says physical attacks do not harm it. */
+  immunePhysical: boolean
+}
+
+/** Parse a 护甲 string such as `2点(毛发与厚皮)` or `21点，包括...`. */
+export function parseArmorText(text: string | null | undefined): ArmorInfo {
+  const raw = String(text ?? '').trim()
+  if (raw.length === 0) return { armor: 0, immunePhysical: false }
+  const immunePhysical = /免疫[^；;。]*物理|物理[^；;。]*(免疫|无效)|无实体/.test(raw)
+  const match = /(\d+)/.exec(raw.replace(/,/g, ''))
+  const armor = match === null ? 0 : Number(match[1])
+  return { armor: immunePhysical ? 0 : armor, immunePhysical }
+}
+
+/** CoC health states used by `apply_damage`. */
+export type HealthStatus = '正常' | '重伤' | '濒死' | '死亡'
+
+/** CoC health state for one HP pair (0 HP is dying, death at -max HP). */
+export function healthStatus(hp: number, maxHp: number): HealthStatus {
+  const maximum = Math.max(1, Math.trunc(maxHp))
+  if (hp <= -maximum) return '死亡'
+  if (hp <= 0) return '濒死'
+  if (hp <= Math.floor(maximum / 2)) return '重伤'
+  return '正常'
+}

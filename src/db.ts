@@ -572,6 +572,35 @@ export function setCharacterTags(charName: string, tags: string[]): string[] {
   return unique
 }
 
+/** Meta key holding the currently active character name. */
+const ACTIVE_CHARACTER_KEY = 'active_character'
+
+/** The character the table is currently playing, or null. */
+export function getActiveCharacterName(): string | null {
+  const value = metaValue(getDb(), ACTIVE_CHARACTER_KEY)
+  return value === undefined || value.length === 0 ? null : value
+}
+
+/** Switch the active character after validating it exists; returns the fresh sheet. */
+export function setActiveCharacter(charName: string): CharacterRecord {
+  const character = requireCharacter(charName)
+  setMetaValue(getDb(), ACTIVE_CHARACTER_KEY, character.char_name)
+  return character
+}
+
+/** Clear the active-character pointer. */
+export function clearActiveCharacter(): void {
+  getDb().prepare('DELETE FROM Meta WHERE key = ?').run(ACTIVE_CHARACTER_KEY)
+}
+
+/** Overwrite HP with a possibly negative value (dying/dead states need HP < 0). */
+export function setCharacterHp(charName: string, hpValue: number): CharacterRecord {
+  if (!Number.isFinite(hpValue)) throw new Error(`HP 必须是数字: ${String(hpValue)}`)
+  requireCharacter(charName)
+  getDb().prepare('UPDATE Characters SET hp = ? WHERE char_name = ?').run(Math.trunc(hpValue), charName)
+  return requireCharacter(charName)
+}
+
 /** Raw SQLite row of `NPC_Templates`. */
 interface TemplateRow {
   npc_name: string
@@ -709,15 +738,17 @@ export function createNpcInstance(templateName: string, instanceId?: string): Np
 
 /**
  * Apply an HP delta to one instance. `hpChange` is a delta: a negative number
- * deals damage, a positive number heals. HP is clamped at 0 and the status
- * becomes `dead` at 0 HP, `active` above it.
+ * deals damage, a positive number heals. HP may go below 0 (CoC dying/death
+ * states): `active` above 0, `dying` at or below 0, `dead` at or below -max HP.
  */
 export function updateNpcInstanceHp(instanceId: string, hpChange: number): NpcInstanceRecord {
   if (!Number.isFinite(hpChange)) throw new Error(`hp_change 必须是数字: ${String(hpChange)}`)
   const instance = requireNpcInstance(instanceId)
+  const template = getNpcTemplate(instance.template_name)
+  const maxHp = Math.max(1, template?.hp ?? instance.current_hp)
   const delta = Math.trunc(hpChange)
-  const hp = Math.max(0, instance.current_hp + delta)
-  const status = hp <= 0 ? 'dead' : 'active'
+  const hp = instance.current_hp + delta
+  const status = hp <= 0 ? (hp <= -maxHp ? 'dead' : 'dying') : 'active'
   getDb().prepare('UPDATE NPC_Instances SET current_hp = ?, status = ? WHERE instance_id = ?').run(hp, status, instanceId)
   return requireNpcInstance(instanceId)
 }

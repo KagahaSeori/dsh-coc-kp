@@ -48,13 +48,17 @@ const call = (toolName, args) => definitions.get(toolName).execute(args, { signa
 
 const EXPECTED_TOOLS = [
   'roll_check',
+  'roll_dice',
   'push_roll',
   'sanity_check',
   'roll_madness',
   'skill_growth',
   'manage_tags',
   'get_snapshot',
+  'switch_character',
+  'get_skill_value',
   'manage_npc',
+  'apply_damage',
   'lookup_weapon',
   'lookup_spell',
   'lookup_npc',
@@ -62,7 +66,7 @@ const EXPECTED_TOOLS = [
 ]
 
 console.log('plugin: registration')
-check('twelve tools registered', () => assert.deepEqual([...definitions.keys()].sort(), [...EXPECTED_TOOLS].sort()))
+check('sixteen tools registered', () => assert.deepEqual([...definitions.keys()].sort(), [...EXPECTED_TOOLS].sort()))
 check('every definition has schema, output.schema and render', () => {
   for (const definition of definitions.values()) {
     assert.ok(definition.description.length > 0, definition.name)
@@ -96,6 +100,36 @@ check('roll_check error shape', () => {
 })
 const cancelRoll = await call('roll_check', { target: 50, bonus_dice: 2, penalty_dice: 2 })
 check('cancel has one tens die', () => assert.equal(cancelRoll.tens_rolls.length, 1))
+
+console.log('tool: roll_dice')
+const multiDice = await call('roll_dice', { expression: '1D6+1D10+2' })
+check('multi-term dice notation', () => {
+  assert.equal(multiDice.expression, '1D6+1D10+2')
+  assert.equal(multiDice.resolved_expression, '1D6+1D10+2')
+  assert.equal(multiDice.rolls.length, 3)
+  assert.equal(multiDice.rolls[0].values.length, 1)
+  assert.equal(multiDice.rolls[1].values.length, 1)
+  assert.deepEqual(multiDice.rolls[2].values, [])
+  const sum = multiDice.rolls.reduce((accumulator, term) => accumulator + term.subtotal, 0)
+  assert.equal(multiDice.total, sum)
+  assert.ok(multiDice.total >= 4 && multiDice.total <= 18)
+})
+const bigDamage = await call('roll_dice', { expression: '1D6+21D6' })
+check('multi-dice damage expression', () => {
+  assert.ok(bigDamage.total >= 22 && bigDamage.total <= 132)
+  assert.equal(bigDamage.rolls.length, 2)
+  assert.equal(bigDamage.rolls[1].values.length, 21)
+})
+const dbDice = await call('roll_dice', { expression: '1D10+DB', db: '1D4' })
+check('DB substitution', () => {
+  assert.equal(dbDice.db, '1D4')
+  assert.equal(dbDice.resolved_expression, '1D10+1D4')
+  assert.ok(dbDice.total >= 2 && dbDice.total <= 14)
+})
+const badDice = await call('roll_dice', { expression: '1D6++2' })
+check('invalid dice expression returns error', () => assert.match(badDice.error, /无法解析骰子表达式|无法解析骰子项/))
+const missingDb = await call('roll_dice', { expression: '1D6+DB' })
+check('missing DB returns error', () => assert.match(missingDb.error, /需要 db 参数|未提供 DB/))
 
 console.log('tool: push_roll')
 const push = await call('push_roll', { skill_value: 80 })
@@ -194,6 +228,53 @@ check('snapshot shape', () => {
 const emptySnapshot = await call('get_snapshot', { group_id: 'no-such-group' })
 check('snapshot for unknown group is empty', () => assert.deepEqual(emptySnapshot.characters, []))
 
+console.log('tool: switch_character + get_skill_value')
+const testB = await call('manage_character', {
+  action: 'create',
+  char_name: '测试员B',
+  group_id: 'g2',
+  attributes: { STR: 120, SIZ: 80, POW: 50 },
+  skills: { '射击(冲锋枪)': 90, 侦查: 30 },
+})
+check('test character B created', () => assert.equal(testB.skills['射击(冲锋枪)'], 90))
+const switched = await call('switch_character', { char_name: '测试员B' })
+check('switch_character returns the full sheet', () => {
+  assert.equal(switched.char_name, '测试员B')
+  assert.equal(switched.active, true)
+  assert.equal(switched.hp, 10)
+  assert.equal(switched.skills['射击(冲锋枪)'], 90)
+  assert.deepEqual(switched.attributes['STR'], 120)
+})
+const liveSkill = await call('get_skill_value', { skill_name: '射击(冲锋枪)' })
+check('get_skill_value reads the active character live', () => {
+  assert.equal(liveSkill.char_name, '测试员B')
+  assert.equal(liveSkill.value, 90)
+  assert.equal(liveSkill.source, 'skills')
+})
+const updatedSkill = await call('manage_character', {
+  action: 'update',
+  char_name: '测试员B',
+  skills: { '射击(冲锋枪)': 95 },
+})
+check('manage_character update merges skills', () => {
+  assert.equal(updatedSkill.skills['射击(冲锋枪)'], 95)
+  assert.equal(updatedSkill.skills['侦查'], 30)
+})
+const freshSkill = await call('get_skill_value', { skill_name: '射击(冲锋枪)' })
+check('get_skill_value sees the SQLite update immediately', () => assert.equal(freshSkill.value, 95))
+const attributeValue = await call('get_skill_value', { skill_name: 'STR' })
+check('get_skill_value falls back to attributes', () => {
+  assert.equal(attributeValue.value, 120)
+  assert.equal(attributeValue.source, 'attributes')
+})
+const missingSkill = await call('get_skill_value', { skill_name: '不存在的技能' })
+check('missing skill returns an error', () => assert.match(missingSkill.error, /没有技能或属性/))
+const rollWithCharDb = await call('roll_dice', { expression: '1D6+DB', char_name: '测试员B' })
+check('DB derived from character STR+SIZ', () => {
+  assert.equal(rollWithCharDb.db, '+1D6')
+  assert.equal(rollWithCharDb.resolved_expression, '1D6+1D6')
+})
+
 console.log('tool: manage_npc')
 const denied = await call('manage_npc', {
   action: 'create_template',
@@ -226,12 +307,90 @@ const damaged = await call('manage_npc', {
   instance_id: instance.instance.instance_id,
   hp_change: -20,
 })
-check('update_hp delta and death', () => {
-  assert.equal(damaged.instance.current_hp, 0)
-  assert.equal(damaged.instance.status, 'dead')
+const finished = await call('manage_npc', {
+  action: 'update_hp',
+  instance_id: instance.instance.instance_id,
+  hp_change: -8,
+})
+check('update_hp records dying and death states', () => {
+  assert.equal(damaged.instance.current_hp, -6)
+  assert.equal(damaged.instance.status, 'dying')
+  assert.equal(finished.instance.current_hp, -14)
+  assert.equal(finished.instance.status, 'dead')
 })
 const missingInstance = await call('manage_npc', { action: 'update_hp', instance_id: 'nope', hp_change: -1 })
 check('update_hp missing instance error', () => assert.match(missingInstance.error, /实例不存在/))
+
+console.log('tool: apply_damage')
+const damageInstance = await call('manage_npc', { action: 'create_instance', npc_name: '拜亚基', instance_id: 'dmg-npc' })
+check('damage target instance created', () => assert.equal(damageInstance.instance.current_hp, 14))
+const hit1 = await call('apply_damage', { target_id: 'dmg-npc', raw_damage: 10 })
+check('armor reduces the damage', () => {
+  assert.equal(hit1.target_type, 'npc')
+  assert.equal(hit1.raw_damage, 10)
+  assert.equal(hit1.armor_value, 2)
+  assert.equal(hit1.actual_damage, 8)
+  assert.equal(hit1.remaining_hp, 6)
+  assert.equal(hit1.max_hp, 14)
+  assert.equal(hit1.status, '重伤')
+})
+const hit2 = await call('apply_damage', { target_id: 'dmg-npc', raw_damage: 1 })
+check('armor fully absorbs small damage', () => {
+  assert.equal(hit2.actual_damage, 0)
+  assert.equal(hit2.remaining_hp, 6)
+})
+const hit3 = await call('apply_damage', { target_id: 'dmg-npc', raw_damage: 20 })
+check('dying state after heavy damage', () => {
+  assert.equal(hit3.actual_damage, 18)
+  assert.equal(hit3.remaining_hp, -12)
+  assert.equal(hit3.status, '濒死')
+})
+const hit4 = await call('apply_damage', { target_id: 'dmg-npc', raw_damage: 5 })
+check('death state after lethal damage', () => {
+  assert.equal(hit4.remaining_hp, -15)
+  assert.equal(hit4.status, '死亡')
+})
+const immuneTemplate = await call('manage_npc', {
+  action: 'create_template',
+  qq_id: '999',
+  npc_name: '免疫测试怪',
+  template_data: { hp: 10, attributes: { 护甲: '无实体，免疫物理攻击' } },
+})
+check('create_template accepts attributes', () =>
+  assert.equal(immuneTemplate.template.attributes['护甲'], '无实体，免疫物理攻击'))
+const immuneInstance = await call('manage_npc', { action: 'create_instance', npc_name: '免疫测试怪', instance_id: 'immune-npc' })
+const immuneHit = await call('apply_damage', { target_id: 'immune-npc', raw_damage: 50 })
+check('physical immunity ignores the damage', () => {
+  assert.equal(immuneHit.immune, true)
+  assert.equal(immuneHit.actual_damage, 0)
+  assert.equal(immuneHit.remaining_hp, 10)
+  assert.equal(immuneHit.status, '正常')
+})
+const charHit1 = await call('apply_damage', { target_id: '测试员B', raw_damage: 4 })
+check('character damage updates HP', () => {
+  assert.equal(charHit1.target_type, 'character')
+  assert.equal(charHit1.raw_damage, 4)
+  assert.equal(charHit1.actual_damage, 4)
+  assert.equal(charHit1.remaining_hp, 6)
+  assert.equal(charHit1.status, '正常')
+})
+const charHit2 = await call('apply_damage', { target_id: '测试员B', raw_damage: 2 })
+check('character major wound state', () => {
+  assert.equal(charHit2.remaining_hp, 4)
+  assert.equal(charHit2.status, '重伤')
+})
+const charHit3 = await call('apply_damage', { target_id: '测试员B', raw_damage: 9 })
+check('character dying state', () => {
+  assert.equal(charHit3.remaining_hp, -5)
+  assert.equal(charHit3.status, '濒死')
+})
+const charHit4 = await call('apply_damage', { target_id: '测试员B', raw_damage: 10 })
+check('character death state', () => {
+  assert.equal(charHit4.remaining_hp, -15)
+  assert.equal(charHit4.status, '死亡')
+})
+const missingTarget = await call('apply_damage', { target_id: '不存在目标', raw_damage: 1 })
+check('missing damage target error', () => assert.match(missingTarget.error, /目标不存在/))
 
 console.log('tool: lookup_weapon')
 const thompson = await call('lookup_weapon', { weapon_name: '汤普森冲锋枪' })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-coc-kp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CoC 7th edition Keeper (KP) tool plugin for DeepSeek Harness: dice checks, sanity, madness, skill growth, tags, party snapshot, NPC/bestiary lookup, weapons and spells, backed by SQLite.",
   "license": "MIT",
   "type": "module",

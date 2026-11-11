@@ -23,6 +23,10 @@ import {
 } from './data/madness.js'
 import type { FumbleRule } from './rules.js'
 import {
+  damageBonusForAttributes,
+  healthStatus,
+  parseArmorText,
+  rollDiceNotation,
   rollDie,
   rollExpression,
   resolveCheck,
@@ -34,6 +38,7 @@ import {
   createNpcInstance,
   createNpcTemplate,
   deleteCharacter,
+  getActiveCharacterName,
   getCharacter,
   getNpcInstance,
   getNpcTemplate,
@@ -44,6 +49,8 @@ import {
   searchNpcTemplates,
   searchSpells,
   searchWeapons,
+  setActiveCharacter,
+  setCharacterHp,
   setCharacterSan,
   setCharacterSkill,
   setCharacterTags,
@@ -234,7 +241,82 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 2. push_roll — house rule "孤注一掷".
+  // 2. roll_dice — general dice notation (CoC damage, multi-term, DB substitution).
+  ctx.tools.register(
+    defineTool({
+      name: 'roll_dice',
+      description:
+        '通用骰子表达式解析（CoC 伤害/任意骰点）：支持 NdM 与多项相加（如 1D6+1D10+2、2D6-1），支持 DB 伤害加值代入——' +
+        '表达式写 DB，并传 db="1D4"；或传 char_name 让插件按角色 STR+SIZ 计算 DB。' +
+        '返回纯 JSON：{ expression, resolved_expression, db, total, rolls }，rolls 含每个骰子的点数明细。',
+      parameters: {
+        expression: { type: 'string', required: true, description: '骰子表达式，如 1D6+1D10+2、1D10+DB、2D6-1' },
+        db: { type: 'string', description: 'DB 伤害加值表达式，如 "1D4"、"+2"、"-1"；表达式含 DB 时使用' },
+        char_name: { type: 'string', description: '可选：按该角色的 STR+SIZ 自动计算 DB（未传 db 时生效）' },
+      },
+      output: {
+        schema: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                expression: { type: 'string', required: true, description: '原始表达式' },
+                resolved_expression: { type: 'string', required: true, description: '代入 DB 后的表达式' },
+                db: { type: 'string', required: true, description: '代入的 DB 表达式；未使用 DB 时为空字符串' },
+                total: { type: 'integer', required: true, description: '总点数' },
+                rolls: {
+                  type: 'array',
+                  required: true,
+                  description: '每一项骰子/常量的明细',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      term: { type: 'string', required: true, description: '项表达式，如 1D6' },
+                      values: { type: 'array', required: true, items: { type: 'integer' }, description: '每个骰子的点数' },
+                      subtotal: { type: 'integer', required: true, description: '该项带符号小计' },
+                    },
+                  },
+                },
+              },
+            },
+            { type: 'object', additionalProperties: false, properties: ERROR_FIELDS },
+          ],
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        return guard(() => {
+          const expression = requireText(args.expression, 'expression')
+          const dbParam = (args.db ?? '').trim()
+          const needsDb = /(^|[+\-])DB([+\-]|$)/i.test(expression.replace(/\s+/g, ''))
+          let dbExpression = dbParam
+          if (needsDb && dbExpression.length === 0) {
+            const charName = (args.char_name ?? '').trim()
+            if (charName.length === 0) {
+              throw new Error('表达式包含 DB，需要 db 参数（如 "1D4"）或 char_name（按角色 STR+SIZ 计算）')
+            }
+            const character = getCharacter(charName)
+            if (character === null) throw new Error(`角色不存在: ${charName}`)
+            const computed = damageBonusForAttributes(character.attributes)
+            if (computed === null) throw new Error(`角色 ${charName} 缺少 STR/SIZ，无法计算 DB`)
+            dbExpression = computed
+          }
+          const result = rollDiceNotation(expression, { db: dbExpression.length > 0 ? dbExpression : undefined })
+          return {
+            expression: result.expression,
+            resolved_expression: result.resolved_expression,
+            db: result.db ?? '',
+            total: result.total,
+            rolls: result.rolls,
+          }
+        })
+      },
+    }),
+  )
+
+  // 3. push_roll — house rule "孤注一掷".
   ctx.tools.register(
     defineTool({
       name: 'push_roll',
@@ -267,7 +349,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 3. sanity_check — SAN check, applies and persists the loss.
+  // 4. sanity_check — SAN check, applies and persists the loss.
   ctx.tools.register(
     defineTool({
       name: 'sanity_check',
@@ -318,7 +400,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 4. roll_madness — draw a symptom from the built-in madness dictionary.
+  // 5. roll_madness — draw a symptom from the built-in madness dictionary.
   ctx.tools.register(
     defineTool({
       name: 'roll_madness',
@@ -369,7 +451,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 5. skill_growth — official CoC 7e skill improvement.
+  // 6. skill_growth — official CoC 7e skill improvement.
   ctx.tools.register(
     defineTool({
       name: 'skill_growth',
@@ -411,7 +493,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 6. manage_tags — add/remove a "death flag" tag.
+  // 7. manage_tags — add/remove a "death flag" tag.
   ctx.tools.register(
     defineTool({
       name: 'manage_tags',
@@ -458,7 +540,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 7. get_snapshot — party snapshot for the current group.
+  // 8. get_snapshot — party snapshot for the current group.
   ctx.tools.register(
     defineTool({
       name: 'get_snapshot',
@@ -510,7 +592,122 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 8. lookup_weapon — built-in weapon library lookup.
+  // 9. switch_character — activate a character and return the fresh sheet.
+  ctx.tools.register(
+    defineTool({
+      name: 'switch_character',
+      description:
+        '切换当前激活角色卡：校验后写入 SQLite，并立即返回该角色最新的完整角色卡 JSON（HP/MP/SAN/属性/技能/标签）。' +
+        '切换后请用 get_skill_value 读取实时技能值，禁止沿用旧数据或默认值。返回纯 JSON。',
+      parameters: {
+        char_name: { type: 'string', required: true, description: '要切换到激活状态的角色名' },
+      },
+      output: {
+        schema: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                char_name: { type: 'string', required: true },
+                owner_qq: { type: 'string', required: true },
+                group_id: { type: 'string', required: true },
+                hpmax: { type: 'integer', required: true },
+                hp: { type: 'integer', required: true },
+                mpmax: { type: 'integer', required: true },
+                mp: { type: 'integer', required: true },
+                sanmax: { type: 'integer', required: true },
+                san: { type: 'integer', required: true },
+                attributes: { type: 'json', required: true },
+                skills: { type: 'json', required: true },
+                tags: { type: 'array', required: true, items: { type: 'string' } },
+                active: { type: 'boolean', required: true, description: '固定为 true' },
+              },
+            },
+            { type: 'object', additionalProperties: false, properties: ERROR_FIELDS },
+          ],
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        return guard(() => {
+          const charName = requireText(args.char_name, 'char_name')
+          const character = setActiveCharacter(charName)
+          return { ...characterOutput(character), active: true as const }
+        })
+      },
+    }),
+  )
+
+  // 10. get_skill_value — live skill lookup, the mandatory pre-check source.
+  ctx.tools.register(
+    defineTool({
+      name: 'get_skill_value',
+      description:
+        '【强制】在执行任何判定或掷骰前，必须先调用本工具获取当前角色的实时技能值。本工具每次调用都直接查询 SQLite，不使用上下文缓存；' +
+        '如果返回值包含 error，必须中断当前判定并向用户说明原因，禁止自行估算（例如用 DEX/2 代替技能值）。' +
+        '默认读取当前激活角色（switch_character 设置），也可传 char_name。返回纯 JSON：{ char_name, skill_name, value, source }。',
+      parameters: {
+        skill_name: { type: 'string', required: true, description: '技能名（如 射击(冲锋枪)、侦查）；也可查属性名' },
+        char_name: { type: 'string', description: '可选：指定角色；省略时使用当前激活角色' },
+      },
+      output: {
+        schema: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                char_name: { type: 'string', required: true },
+                skill_name: { type: 'string', required: true },
+                value: { type: 'integer', required: true, description: '实时技能/属性值' },
+                source: {
+                  type: 'string',
+                  required: true,
+                  enum: ['skills', 'attributes'],
+                  description: '该值来自技能表还是属性表',
+                },
+              },
+            },
+            { type: 'object', additionalProperties: false, properties: ERROR_FIELDS },
+          ],
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        return guard(() => {
+          const skillName = requireText(args.skill_name, 'skill_name')
+          const explicitName = (args.char_name ?? '').trim()
+          const charName = explicitName.length > 0 ? explicitName : getActiveCharacterName()
+          if (charName === null) throw new Error('没有激活角色：请先调用 switch_character 切换角色卡')
+          const character = getCharacter(charName)
+          if (character === null) throw new Error(`角色不存在: ${charName}`)
+          const skill = character.skills[skillName]
+          if (skill !== undefined) {
+            return { char_name: charName, skill_name: skillName, value: Math.trunc(skill), source: 'skills' as const }
+          }
+          const rawAttribute = character.attributes[skillName]
+          const attributeValue =
+            typeof rawAttribute === 'number'
+              ? rawAttribute
+              : typeof rawAttribute === 'string'
+                ? Number(rawAttribute)
+                : Number.NaN
+          if (Number.isFinite(attributeValue)) {
+            return {
+              char_name: charName,
+              skill_name: skillName,
+              value: Math.trunc(attributeValue),
+              source: 'attributes' as const,
+            }
+          }
+          throw new Error(`角色 ${charName} 没有技能或属性: ${skillName}`)
+        })
+      },
+    }),
+  )
+
+  // 11. lookup_weapon — built-in weapon library lookup.
   ctx.tools.register(
     defineTool({
       name: 'lookup_weapon',
@@ -581,7 +778,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 9. lookup_spell — built-in spell catalogue lookup.
+  // 12. lookup_spell — built-in spell catalogue lookup.
   ctx.tools.register(
     defineTool({
       name: 'lookup_spell',
@@ -671,7 +868,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 10. lookup_npc — built-in bestiary lookup.
+  // 13. lookup_npc — built-in bestiary lookup.
   ctx.tools.register(
     defineTool({
       name: 'lookup_npc',
@@ -741,7 +938,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 11. manage_npc — bestiary templates and instances.
+  // 14. manage_npc — bestiary templates and instances.
   ctx.tools.register(
     defineTool({
       name: 'manage_npc',
@@ -834,6 +1031,10 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
               db: stringField(data['db'], 'template_data.db'),
               build: numberField(data['build'], 'template_data.build'),
               skills: data['skills'] === undefined ? undefined : numberRecord(data['skills'], 'template_data.skills'),
+              attributes:
+                data['attributes'] === undefined
+                  ? undefined
+                  : plainRecord(data['attributes'], 'template_data.attributes'),
             })
             return { action: 'create_template' as const, template: templateOutput(template) }
           }
@@ -851,13 +1052,104 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }),
   )
 
-  // 12. manage_character — character sheet lifecycle (documented extension).
+  // 15. apply_damage — combat damage with armor, immunity and health states.
+  ctx.tools.register(
+    defineTool({
+      name: 'apply_damage',
+      description:
+        '战斗伤害结算：对 NPC 实例（instance_id）或角色（char_name）结算物理伤害。按 CoC 规则读取怪物模板的「护甲」/免疫属性，' +
+        '实际扣血 = max(0, raw_damage - armor)；物理免疫时扣 0。更新数据库 HP 后返回：' +
+        '{ target_id, target_type, raw_damage, armor_value, immune, actual_damage, remaining_hp, max_hp, status }，' +
+        'status 为 正常/重伤/濒死/死亡。返回纯 JSON。',
+      parameters: {
+        target_id: { type: 'string', required: true, description: '目标：NPC 实例 ID（instance_id）或角色名' },
+        raw_damage: { type: 'number', required: true, description: '原始伤害值（已算好骰点与 DB，非负）' },
+      },
+      output: {
+        schema: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                target_id: { type: 'string', required: true, description: '目标 ID/角色名' },
+                target_type: {
+                  type: 'string',
+                  required: true,
+                  enum: ['npc', 'character'],
+                  description: '目标是 NPC 实例还是角色',
+                },
+                raw_damage: { type: 'integer', required: true, description: '原始伤害' },
+                armor_value: { type: 'integer', required: true, description: '护甲减伤点数' },
+                immune: { type: 'boolean', required: true, description: '是否物理免疫' },
+                actual_damage: { type: 'integer', required: true, description: '实际扣除的 HP' },
+                remaining_hp: { type: 'integer', required: true, description: '结算后的 HP（可为负）' },
+                max_hp: { type: 'integer', required: true, description: '目标 HP 上限' },
+                status: {
+                  type: 'string',
+                  required: true,
+                  enum: ['正常', '重伤', '濒死', '死亡'],
+                  description: '结算后的健康状态',
+                },
+              },
+            },
+            { type: 'object', additionalProperties: false, properties: ERROR_FIELDS },
+          ],
+        },
+        render: renderJson,
+      },
+      async execute(args) {
+        return guard(() => {
+          const targetId = requireText(args.target_id, 'target_id')
+          if (!Number.isFinite(args.raw_damage)) throw new Error(`raw_damage 必须是数字: ${String(args.raw_damage)}`)
+          const rawDamage = Math.max(0, Math.trunc(args.raw_damage))
+          const npc = getNpcInstance(targetId)
+          if (npc !== null) {
+            const template = getNpcTemplate(npc.template_name)
+            const armorText = template?.attributes['护甲']
+            const armor = parseArmorText(typeof armorText === 'string' ? armorText : undefined)
+            const actualDamage = armor.immunePhysical ? 0 : Math.max(0, rawDamage - armor.armor)
+            const updated = updateNpcInstanceHp(npc.instance_id, -actualDamage)
+            const maxHp = Math.max(1, template?.hp ?? updated.current_hp)
+            return {
+              target_id: npc.instance_id,
+              target_type: 'npc' as const,
+              raw_damage: rawDamage,
+              armor_value: armor.armor,
+              immune: armor.immunePhysical,
+              actual_damage: actualDamage,
+              remaining_hp: updated.current_hp,
+              max_hp: maxHp,
+              status: healthStatus(updated.current_hp, maxHp),
+            }
+          }
+          const character = getCharacter(targetId)
+          if (character === null) throw new Error(`目标不存在: ${targetId}`)
+          const updated = setCharacterHp(character.char_name, character.hp - rawDamage)
+          return {
+            target_id: character.char_name,
+            target_type: 'character' as const,
+            raw_damage: rawDamage,
+            armor_value: 0,
+            immune: false,
+            actual_damage: rawDamage,
+            remaining_hp: updated.hp,
+            max_hp: updated.hpmax,
+            status: healthStatus(updated.hp, updated.hpmax),
+          }
+        })
+      },
+    }),
+  )
+
+  // 16. manage_character — character sheet lifecycle (documented extension).
   ctx.tools.register(
     defineTool({
       name: 'manage_character',
       description:
         '角色卡管理（任务书未包含、按需要补充）：create 建档、get 查看、update 修改、delete 删除。' +
-        'attributes/skills 用 JSON 对象传入；建档时若给出 POW 会自动把初始 SAN 设为 POW（CoC 7版 SAN=POW）。返回纯 JSON。',
+        'attributes/skills 用 JSON 对象传入；update 时 attributes/skills 按「合并」写入（只覆盖传入的键，不会清空其它技能）。' +
+        '建档时若给出 POW 会自动把初始 SAN 设为 POW（CoC 7版 SAN=POW）。返回纯 JSON。',
       parameters: {
         action: {
           type: 'string',
@@ -938,7 +1230,15 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
             return characterOutput(character)
           }
           if (action === 'update') {
-            return characterOutput(updateCharacter(charName, patch))
+            const current = getCharacter(charName)
+            if (current === null) throw new Error(`角色不存在: ${charName}`)
+            const merged: CharacterPatch = {
+              ...patch,
+              attributes:
+                patch.attributes === undefined ? undefined : { ...current.attributes, ...patch.attributes },
+              skills: patch.skills === undefined ? undefined : { ...current.skills, ...patch.skills },
+            }
+            return characterOutput(updateCharacter(charName, merged))
           }
           deleteCharacter(charName)
           return { char_name: charName, deleted: true as const }

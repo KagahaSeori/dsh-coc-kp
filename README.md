@@ -3,7 +3,7 @@
 克苏鲁的呼唤（Call of Cthulhu）第 7 版守秘人（KP）工具插件，运行在
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上。
 
-**纯后端工具插件**：12 个工具全部只返回符合 schema 的 JSON 对象，不返回自然语言或
+**纯后端工具插件**：16 个工具全部只返回符合 schema 的 JSON 对象，不返回自然语言或
 Markdown，叙事由调用方 AI 负责。数据持久化使用 `better-sqlite3`（同步 API），数据库
 文件位于插件目录下的 `data.db`。
 
@@ -33,12 +33,16 @@ issue 联系，我们会及时处理。
 | 工具 | 作用 | 返回 JSON |
 | --- | --- | --- |
 | `roll_check` | CoC 7e 技能/属性判定（奖励骰/惩罚骰） | `{ tens_rolls, ones_roll, final_result, success_level, is_success }` |
+| `roll_dice` | 通用骰子表达式：多项 `NdM+K`、`1D6+21D6`、DB 伤害加值代入 | `{ expression, resolved_expression, db, total, rolls }` |
 | `push_roll` | 村规·孤注一掷：target = min(技能, 50) | `{ roll, target, result }` |
 | `sanity_check` | 理智检定并扣除、写回 SAN | `{ roll, is_success, san_loss, current_san }` |
 | `roll_madness` | 疯狂表查表（ti/li；恐惧/躁狂条目自动补抽 1D100） | `{ roll, symptom }` |
 | `skill_growth` | 官方技能成长（d100 > 当前值则 +1d10） | `{ success, growth, new_value }` |
 | `manage_tags` | 代死标签增删 | `{ updated_tags }` |
 | `get_snapshot` | 群内全员 HP/SAN/标签快照 | `{ characters: [{ char_name, hp, san, tags }] }` |
+| `switch_character` | 切换激活角色卡，返回最新完整角色 JSON | 角色卡对象 + `active: true` |
+| `get_skill_value` | 【强制】判定前查询当前角色实时技能值（直查 SQLite） | `{ char_name, skill_name, value, source }` |
+| `apply_damage` | 战斗伤害结算：护甲/物理免疫/HP 状态 | `{ target_id, target_type, raw_damage, armor_value, immune, actual_damage, remaining_hp, max_hp, status }` |
 | `manage_npc` | 怪物模板/实例/HP 变化 | 模板或实例对象 |
 | `lookup_weapon` | 武器库查询（26 件：近战/手枪/步枪/冲锋枪/爆炸物） | 武器对象或候选列表 |
 | `lookup_spell` | 法术查询（545 条纯机制数据，含 `manual_review_needed` 标记） | 法术对象或候选列表 |
@@ -47,6 +51,20 @@ issue 联系，我们会及时处理。
 
 所有失败（角色不存在、表达式无法解析、数据库异常、权限不足等）都以
 `{ "error": "…" }` 返回，不会抛出、不会中断对话轮次。
+
+## 跑团流程约定（v0.2）
+
+1. **判定前先读实时技能**：必须先调用 `get_skill_value`（默认读 `switch_character`
+   设置的激活角色），返回 `error` 时必须中断判定，禁止用 DEX/2 等默认值估算。
+2. **切换角色**：`switch_character` 会把激活角色写进 SQLite，并返回该角色最新完整
+   角色卡 JSON；之后所有读取都基于数据库实时值。
+3. **改技能**：`manage_character` 的 `update` 对 `skills`/`attributes` 是**合并写入**
+   （只覆盖传入的键），不会清空其它技能。
+4. **伤害流程**：`roll_dice` 算出伤害（支持 `1D6+21D6`、`1D10+DB` 等）→
+   `apply_damage` 结算：自动读取怪物模板「护甲」扣减、判断物理免疫，
+   返回 `actual_damage` / `remaining_hp` / `status`（正常/重伤/濒死/死亡）。
+5. **DB 代入**：`roll_dice` 传 `db: "1D4"` 直接代入；或传 `char_name` 由角色
+   STR+SIZ 自动算 DB（例如 STR120+SIZ80 → `+1D6`）。
 
 ## 配置
 
@@ -127,9 +145,13 @@ issue 联系，我们会及时处理。
 2. **`manage_character`（第 9 个工具）**：任务书的 8 个工具没有建档/读卡入口，
    `sanity_check`、`skill_growth`、`manage_tags` 无法实际使用，因此补充
    `create/get/update/delete`。
-3. **`lookup_weapon` / `lookup_spell` / `lookup_npc`（第 10–12 个工具）**：按需求新增，
+3. **`lookup_weapon` / `lookup_spell` / `lookup_npc`（第 13–15 个工具）**：按需求新增，
    把 `表.txt` 武器库、`coc_spells.json` 法术表与怪物图鉴入库后提供查询；三者都支持
    精确匹配、模糊候选列表，武器/怪物还支持分类过滤。
+4. **`roll_dice` / `switch_character` / `get_skill_value` / `apply_damage`（第 16–19 个
+   新增能力，v0.2）**：通用骰子解析（多骰项 + DB）、激活角色实时技能查询、战斗伤害
+   结算（护甲/免疫/HP 状态）。`get_skill_value` 的工具描述里带「判定前必须调用」的强制
+   指令；`apply_damage` 严格按 `max(0, raw_damage - armor)` 结算。
 3. **`manage_npc` 参数**：`qq_id` / `npc_name` 改为按 action 校验（create_template 需要
    KP 权限与模板名；create_instance 需要模板名；update_hp 需要 instance_id 与 hp_change），
    避免为 update_hp 强制传无关参数。
@@ -225,12 +247,12 @@ git push -u origin master
 
 ```bash
 pnpm build        # tsc -> dist/
-pnpm test         # 本地校验（规则/数据/数据库/11 个工具接线）
+pnpm test         # 本地校验（规则/数据/数据库/16 个工具接线）
 pnpm import:tables  # 从 表.txt + coc_spells.json 重新生成 src/data/*.ts
 ```
 
 `test/smoke.mjs` 覆盖规则、数据与数据库；`test/tools.mjs` 用假 Cordis 上下文
-挂载插件并逐个执行 12 个工具（含错误路径与候选列表）。
+挂载插件并逐个执行 16 个工具（含错误路径与候选列表、伤害/濒死/死亡状态）。
 
 种子数据只在 Meta 记录的版本号变化时导入；更新 `表.txt`、`新怪物.json` 或
 `coc_spells.json` 后，重新运行 `pnpm import:tables` 并提升 `src/db.ts` 中对应的
