@@ -1,0 +1,31 @@
+# dependencies and build output
+node_modules/
+.pnpm-store/
+dist/
+release/
+
+# runtime database (created on first tool use; never commit user data)
+data.db
+data.db-shm
+data.db-wal
+.test-*.db
+.test-*.db-shm
+.test-*.db-wal
+
+# local, per-operator KP identity (QQ number + in-group nickname).
+# Copy kp.config.example.json to kp.config.json and fill in your own values.
+kp.config.json
+
+# sandbox / OS junk
+.acl-recovery/
+*.log
+.DS_Store
+Thumbs.db
+.probe
+
+# user-supplied rule-data sources (copyright: they stay local; the generated
+# modules under src/data/ are committed instead)
+表.txt
+coc_spells.json
+新怪物.json
+任务.txt

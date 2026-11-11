@@ -1,0 +1,15 @@
+# dsh-coc-kp — CoC 7th edition Keeper (KP) tool plugin.
+#
+# The bundle inserts one Host plugin row; personal values stay in the
+# git-ignored kp.config.json (see kp.config.example.json).
+# - fumble_rule: fumble threshold policy (auto | 96-100 | only-100). "auto" is
+#   the official CoC 7e rule: skill >= 50 fumbles only on 100, below 50 on 96-100.
+# - kp_qq_id / kp_nickname: leave empty here; kp.config.json overrides them, and
+#   the KP_QQ_ID environment variable is the last fallback.
+- insert:
+    - id: dsh-coc-kp
+      name: dsh-coc-kp
+      config:
+        fumble_rule: auto
+        kp_qq_id: ''
+        kp_nickname: ''
