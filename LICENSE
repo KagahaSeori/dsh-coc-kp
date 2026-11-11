@@ -22,9 +22,8 @@ SOFTWARE.
 
 ---
 
-Game data notice: the Call of Cthulhu game system, its creature stats, spells,
-weapons and madness tables are the intellectual property of Chaosium Inc. (and
-their Chinese localisation publishers). This repository only ships code under
-the MIT license; the rule data was supplied by the user and is intended for
-personal tabletop use. Do not redistribute the data publicly or commercially
-without permission from the rights holders.
+Data notice: this project ships its rule data as structured database/JSON fields
+(numbers, check conditions, indexes and mechanic descriptions) for tabletop
+automation only. It does not reproduce the Call of Cthulhu rulebook's body text,
+layout or artwork. If a rights holder believes any entry needs adjustment or
+removal, please open an issue and it will be handled promptly.
