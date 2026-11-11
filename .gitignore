@@ -29,3 +29,6 @@ Thumbs.db
 coc_spells.json
 新怪物.json
 任务.txt
+
+# local SSH key used only to push this repository
+.ssh/
