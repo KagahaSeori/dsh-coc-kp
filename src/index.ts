@@ -128,12 +128,29 @@ const ERROR_FIELDS = {
   error: { type: 'string', required: true, description: '错误信息' },
 } as const
 
+/**
+ * Models sometimes send a JSON value as a string (`"{\"闪避\": 25}"`). Decode
+ * those before shape validation so a wrong-but-parseable argument yields a
+ * readable `{ error }` instead of a pipeline `INVALID_ARGS` rejection.
+ */
+function decodeJsonString(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const text = value.trim()
+  if (!(text.startsWith('{') || text.startsWith('['))) return value
+  try {
+    return JSON.parse(text)
+  } catch {
+    return value
+  }
+}
+
 /** Validate that a tool argument is a JSON object and return it as a plain record. */
 function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} 必须是 JSON 对象`)
+  const decoded = decodeJsonString(value)
+  if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) {
+    throw new Error(`${label} 必须是 JSON 对象（例如 {"侦查": 60}）`)
   }
-  return value as Record<string, unknown>
+  return decoded as Record<string, unknown>
 }
 
 /** Validate that a tool argument is a `{ name: number }` map. */
@@ -142,10 +159,38 @@ function numberRecord(value: unknown, label: string): Record<string, number> {
   const result: Record<string, number> = {}
   for (const [key, raw] of Object.entries(record)) {
     const number = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN
-    if (!Number.isFinite(number)) throw new Error(`${label}.${key} 必须是数字`)
+    if (!Number.isFinite(number)) throw new Error(`${label}.${key} 必须是数字（收到: ${JSON.stringify(raw)}）`)
     result[key] = number
   }
   return result
+}
+
+/** Coerce a number argument that may arrive as a numeric string (`"10"`). */
+function toNumber(value: unknown, label: string): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  throw new Error(`${label} 必须是数字（收到: ${JSON.stringify(value)}）`)
+}
+
+/** Optional variant of {@link toNumber}. */
+function optionalNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined
+  return toNumber(value, label)
+}
+
+/** Accept an array of tags, or a comma/space separated string. */
+function stringList(value: unknown, label: string): string[] {
+  const decoded = decodeJsonString(value)
+  const items = Array.isArray(decoded)
+    ? decoded
+    : typeof decoded === 'string'
+      ? decoded.split(/[,，、;；\s]+/)
+      : null
+  if (items === null) throw new Error(`${label} 必须是字符串数组（收到: ${JSON.stringify(value)}）`)
+  return items.map((item) => String(item).trim()).filter((item) => item.length > 0)
 }
 
 /** Validate a non-empty string argument. */
@@ -195,9 +240,13 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         'CoC 7版技能/属性判定。投 1 个骰子作为个位、1+N 个骰子作为十位（奖励骰取最低十位，惩罚骰取最高十位）。' +
         '返回纯 JSON：tens_rolls(十位骰面值数组)、ones_roll(个位)、final_result(1-100)、success_level(大成功/极难/困难/成功/失败/大失败)、is_success。',
       parameters: {
-        target: { type: 'number', required: true, description: '技能或属性值（非负整数）' },
-        bonus_dice: { type: 'number', description: '奖励骰数量，默认 0' },
-        penalty_dice: { type: 'number', description: '惩罚骰数量，默认 0' },
+        target: {
+          oneOf: [{ type: 'number' }, { type: 'string' }],
+          required: true,
+          description: '技能或属性值（非负整数，可传 "60" 这类数字字符串）',
+        },
+        bonus_dice: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '奖励骰数量，默认 0' },
+        penalty_dice: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '惩罚骰数量，默认 0' },
       },
       output: {
         schema: {
@@ -231,9 +280,9 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
       async execute(args) {
         return guard(() =>
           resolveCheck(
-            args.target,
-            args.bonus_dice ?? 0,
-            args.penalty_dice ?? 0,
+            toNumber(args.target, 'target'),
+            args.bonus_dice === undefined ? 0 : toNumber(args.bonus_dice, 'bonus_dice'),
+            args.penalty_dice === undefined ? 0 : toNumber(args.penalty_dice, 'penalty_dice'),
             pluginConfig.fumble_rule,
           ),
         )
@@ -324,7 +373,11 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         '村规·孤注一掷：target = min(技能值, 50)，投 1D100，≤target 为大成功，否则大失败。' +
         '返回纯 JSON：{ roll, target, result }。',
       parameters: {
-        skill_value: { type: 'number', required: true, description: '技能值（非负整数）' },
+        skill_value: {
+          oneOf: [{ type: 'number' }, { type: 'string' }],
+          required: true,
+          description: '技能值（非负整数，可传数字字符串）',
+        },
       },
       output: {
         schema: {
@@ -344,7 +397,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         render: renderJson,
       },
       async execute(args) {
-        return guard(() => resolvePushRoll(args.skill_value))
+        return guard(() => resolvePushRoll(toNumber(args.skill_value, 'skill_value')))
       },
     }),
   )
@@ -956,7 +1009,10 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         qq_id: { type: 'string', description: '操作者 QQ 号；create_template 时必须是 KP' },
         npc_name: { type: 'string', description: 'create_template 的模板名 / create_instance 要实例化的模板名' },
         instance_id: { type: 'string', description: '实例 ID；create_instance 省略时自动生成' },
-        hp_change: { type: 'number', description: 'update_hp 的 HP 变化量（负数扣血）' },
+        hp_change: {
+          oneOf: [{ type: 'number' }, { type: 'string' }],
+          description: 'update_hp 的 HP 变化量（负数扣血、正数回血；可传数字字符串）',
+        },
         template_data: { type: 'json', description: '自定义模板数据：{ hp?, mp?, db?, build?, skills? }' },
       },
       output: {
@@ -1045,7 +1101,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           }
           const instanceId = requireText(args.instance_id, 'instance_id')
           if (args.hp_change === undefined) throw new Error('update_hp 需要 hp_change 参数')
-          const instance = updateNpcInstanceHp(instanceId, args.hp_change)
+          const instance = updateNpcInstanceHp(instanceId, toNumber(args.hp_change, 'hp_change'))
           return { action: 'update_hp' as const, instance }
         })
       },
@@ -1063,7 +1119,11 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         'status 为 正常/重伤/濒死/死亡。返回纯 JSON。',
       parameters: {
         target_id: { type: 'string', required: true, description: '目标：NPC 实例 ID（instance_id）或角色名' },
-        raw_damage: { type: 'number', required: true, description: '原始伤害值（已算好骰点与 DB，非负）' },
+        raw_damage: {
+          oneOf: [{ type: 'number' }, { type: 'string' }],
+          required: true,
+          description: '原始伤害值（已算好骰点与 DB，非负；可传数字字符串）',
+        },
       },
       output: {
         schema: {
@@ -1101,8 +1161,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
       async execute(args) {
         return guard(() => {
           const targetId = requireText(args.target_id, 'target_id')
-          if (!Number.isFinite(args.raw_damage)) throw new Error(`raw_damage 必须是数字: ${String(args.raw_damage)}`)
-          const rawDamage = Math.max(0, Math.trunc(args.raw_damage))
+          const rawDamage = Math.max(0, Math.trunc(toNumber(args.raw_damage, 'raw_damage')))
           const npc = getNpcInstance(targetId)
           if (npc !== null) {
             const template = getNpcTemplate(npc.template_name)
@@ -1158,17 +1217,20 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           description: '要执行的操作',
         },
         char_name: { type: 'string', required: true, description: '角色名（主键）' },
-        owner_qq: { type: 'string', description: '拥有者 QQ 号' },
-        group_id: { type: 'string', description: '所属 QQ 群号' },
-        hpmax: { type: 'number', description: 'HP 上限' },
-        hp: { type: 'number', description: '当前 HP' },
-        mpmax: { type: 'number', description: 'MP 上限' },
-        mp: { type: 'number', description: '当前 MP' },
-        sanmax: { type: 'number', description: 'SAN 上限' },
-        san: { type: 'number', description: '当前 SAN' },
-        attributes: { type: 'json', description: '属性 JSON，如 { STR: 60, DEX: 50, POW: 55 }' },
-        skills: { type: 'json', description: '技能 JSON，如 { 侦查: 60, 聆听: 45 }' },
-        tags: { type: 'array', description: '标签列表', items: { type: 'string' } },
+        owner_qq: { oneOf: [{ type: 'string' }, { type: 'number' }], description: '拥有者 QQ 号' },
+        group_id: { oneOf: [{ type: 'string' }, { type: 'number' }], description: '所属 QQ 群号' },
+        hpmax: { oneOf: [{ type: 'number' }, { type: 'string' }], description: 'HP 上限（数字）' },
+        hp: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '当前 HP（数字；技能请放 skills，别放 hp）' },
+        mpmax: { oneOf: [{ type: 'number' }, { type: 'string' }], description: 'MP 上限（数字）' },
+        mp: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '当前 MP（数字）' },
+        sanmax: { oneOf: [{ type: 'number' }, { type: 'string' }], description: 'SAN 上限（数字）' },
+        san: { oneOf: [{ type: 'number' }, { type: 'string' }], description: '当前 SAN（数字）' },
+        attributes: { type: 'json', description: '属性 JSON，如 { STR: 60, DEX: 50, POW: 55 }（也接受 JSON 字符串）' },
+        skills: { type: 'json', description: '技能 JSON，如 { 侦查: 60, 聆听: 45 }（也接受 JSON 字符串）' },
+        tags: {
+          oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'string' }],
+          description: '标签列表（字符串数组，或逗号分隔的字符串）',
+        },
       },
       output: {
         schema: {
@@ -1209,17 +1271,17 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           const action = args.action
           const charName = requireText(args.char_name, 'char_name')
           const patch: CharacterPatch = {
-            owner_qq: args.owner_qq,
-            group_id: args.group_id,
-            hpmax: args.hpmax,
-            hp: args.hp,
-            mpmax: args.mpmax,
-            mp: args.mp,
-            sanmax: args.sanmax,
-            san: args.san,
+            owner_qq: args.owner_qq === undefined ? undefined : String(args.owner_qq),
+            group_id: args.group_id === undefined ? undefined : String(args.group_id),
+            hpmax: optionalNumber(args.hpmax, 'hpmax'),
+            hp: optionalNumber(args.hp, 'hp'),
+            mpmax: optionalNumber(args.mpmax, 'mpmax'),
+            mp: optionalNumber(args.mp, 'mp'),
+            sanmax: optionalNumber(args.sanmax, 'sanmax'),
+            san: optionalNumber(args.san, 'san'),
             attributes: args.attributes === undefined ? undefined : plainRecord(args.attributes, 'attributes'),
             skills: args.skills === undefined ? undefined : numberRecord(args.skills, 'skills'),
-            tags: args.tags,
+            tags: args.tags === undefined ? undefined : stringList(args.tags, 'tags'),
           }
           if (action === 'create') {
             return characterOutput(createCharacter({ ...patch, char_name: charName }))
@@ -1248,18 +1310,18 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   )
 }
 
-/** Read an optional numeric field out of `template_data`; rejects junk. */
+/** Read an optional numeric field out of `template_data`; numeric strings accepted. */
 function numberField(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${label} 必须是数字`)
-  return value
+  return toNumber(value, label)
 }
 
-/** Read an optional string field out of `template_data`; rejects junk. */
+/** Read an optional string field out of `template_data`; numbers are stringified. */
 function stringField(value: unknown, label: string): string | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'string') throw new Error(`${label} 必须是字符串`)
-  return value
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  throw new Error(`${label} 必须是字符串`)
 }
 
 /** Project a stored template into the JSON tool result. */

@@ -100,6 +100,10 @@ check('roll_check error shape', () => {
 })
 const cancelRoll = await call('roll_check', { target: 50, bonus_dice: 2, penalty_dice: 2 })
 check('cancel has one tens die', () => assert.equal(cancelRoll.tens_rolls.length, 1))
+const stringCheck = await call('roll_check', { target: '60' })
+check('roll_check accepts numeric strings', () => {
+  assert.ok(stringCheck.final_result >= 1 && stringCheck.final_result <= 100)
+})
 
 console.log('tool: roll_dice')
 const multiDice = await call('roll_dice', { expression: '1D6+1D10+2' })
@@ -158,6 +162,28 @@ check('character create shape', () => {
 })
 const duplicate = await call('manage_character', { action: 'create', char_name: '艾琳' })
 check('duplicate character returns error', () => assert.match(duplicate.error, /角色已存在/))
+const lenient = await call('manage_character', {
+  action: 'create',
+  char_name: '容错测试员',
+  owner_qq: 12345,
+  hp: '10',
+  attributes: '{"STR": 60, "POW": 50}',
+  skills: '{"闪避": 30}',
+  tags: '旧伤, 新人',
+})
+check('lenient argument types are accepted', () => {
+  assert.equal(lenient.hp, 10)
+  assert.equal(lenient.owner_qq, '12345')
+  assert.equal(lenient.attributes['STR'], 60)
+  assert.equal(lenient.skills['闪避'], 30)
+  assert.deepEqual(lenient.tags, ['旧伤', '新人'])
+})
+const misplacedHp = await call('manage_character', {
+  action: 'create',
+  char_name: '错误类型测试员',
+  hp: '{"闪避": 25}',
+})
+check('misplaced skills in hp returns readable error', () => assert.match(misplacedHp.error, /hp 必须是数字/))
 const got = await call('manage_character', { action: 'get', char_name: '艾琳' })
 check('character get round-trips JSON columns', () => {
   assert.deepEqual(got.attributes, { STR: 55, POW: 60, DEX: 70 })
@@ -295,6 +321,29 @@ check('create_template as KP', () => {
   assert.equal(template.template.hp, 9)
   assert.equal(template.template.skills['撕咬'], 45)
 })
+const lenientTemplate = await call('manage_npc', {
+  action: 'create_template',
+  qq_id: '999',
+  npc_name: '容错怪',
+  template_data: { hp: '8', mp: '3', db: 0, build: '1', skills: { 爪击: '35' } },
+})
+check('template_data accepts numeric strings', () => {
+  assert.equal(lenientTemplate.template.hp, 8)
+  assert.equal(lenientTemplate.template.db, '0')
+  assert.equal(lenientTemplate.template.build, 1)
+  assert.equal(lenientTemplate.template.skills['爪击'], 35)
+})
+const stringHpInstance = await call('manage_npc', {
+  action: 'create_instance',
+  npc_name: '拜亚基',
+  instance_id: 'string-hp',
+})
+const stringHp = await call('manage_npc', {
+  action: 'update_hp',
+  instance_id: stringHpInstance.instance.instance_id,
+  hp_change: '-3',
+})
+check('hp_change accepts numeric strings', () => assert.equal(stringHp.instance.current_hp, 11))
 const instance = await call('manage_npc', { action: 'create_instance', npc_name: '拜亚基' })
 check('create_instance from seeded bestiary', () => {
   assert.equal(instance.action, 'create_instance')
@@ -391,6 +440,13 @@ check('character death state', () => {
 })
 const missingTarget = await call('apply_damage', { target_id: '不存在目标', raw_damage: 1 })
 check('missing damage target error', () => assert.match(missingTarget.error, /目标不存在/))
+
+const stringDamage = await call('apply_damage', { target_id: '容错测试员', raw_damage: '3' })
+check('raw_damage accepts numeric strings', () => {
+  assert.equal(stringDamage.target_type, 'character')
+  assert.equal(stringDamage.actual_damage, 3)
+  assert.equal(stringDamage.remaining_hp, 7)
+})
 
 console.log('tool: lookup_weapon')
 const thompson = await call('lookup_weapon', { weapon_name: '汤普森冲锋枪' })

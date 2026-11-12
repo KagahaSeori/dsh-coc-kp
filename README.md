@@ -65,6 +65,9 @@ issue 联系，我们会及时处理。
    返回 `actual_damage` / `remaining_hp` / `status`（正常/重伤/濒死/死亡）。
 5. **DB 代入**：`roll_dice` 传 `db: "1D4"` 直接代入；或传 `char_name` 由角色
    STR+SIZ 自动算 DB（例如 STR120+SIZ80 → `+1D6`）。
+6. **参数容错（v0.2.1）**：数值参数可传数字字符串（`"10"`）；`attributes`/`skills`
+   可传 JSON 对象或 JSON 字符串；`tags` 可传数组或逗号分隔字符串。模型传错类型时
+   返回可读的 `{ error: "…" }`（例如「hp 必须是数字」），不再抛 `INVALID_ARGS`。
 
 ## 配置
 
